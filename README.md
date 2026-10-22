@@ -21,11 +21,13 @@ and downloads the languages the user picks.
 ```
 
 `url` is relative to the manifest URL, so the manifest in the latest release can point at assets
-of any release. `bytes` and `sha256` describe the uncompressed index.
+of any release. `bytes` and `sha256` describe the uncompressed index. Since 2026-10-23 every
+language also has `details: {url, bytes, sha256, gzBytes, entries}`, the entry pages
+(`<code>.details.gz`), an optional second download in the app.
 
 ## Uploading
 
-`upload.sh IDX_DIR [TAG]` gzips every `IDX_DIR/<code>.idx` listed in `IDX_DIR/manifest.json`,
+`upload.sh IDX_DIR OUT_DIR TAG` gzips every `IDX_DIR/<code>.idx` (and `<code>.details`) listed in `IDX_DIR/manifest.json`,
 rewrites the URLs and uploads everything with `gh release upload`. Releases hold at most
 1000 assets, so large sets are split over several tags; the manifest goes into the last one,
 which is marked latest.

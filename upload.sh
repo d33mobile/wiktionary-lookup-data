@@ -2,8 +2,9 @@
 # Publishes language indexes as GitHub release assets of this repository.
 #
 # Usage: upload.sh IDX_DIR OUT_DIR TAG
-#   IDX_DIR  holds <code>.idx files and manifest.json
-#            ({languages: [{code, name, entries, bytes, sha256, url}]})
+#   IDX_DIR  holds <code>.idx files, optional <code>.details sidecars and
+#            manifest.json ({languages: [{code, name, entries, bytes, sha256,
+#            url, details?: {url, bytes, sha256, entries}}]})
 #   OUT_DIR  receives <code>.idx.gz and the published manifest.json
 #   TAG      release tag, e.g. data-2026-10-22
 #
@@ -27,32 +28,53 @@ mkdir -p "$out_dir"
 gzip_cmd=(gzip -9 -n -c)
 if command -v pigz >/dev/null; then gzip_cmd=(pigz -9 -n -c); fi
 
-# Gzip, then write the published manifest and one "tag<TAB>file" line per asset.
+# Gzip (or reuse an up-to-date <file>.gz next to the source), then write the
+# published manifest and one "tag<TAB>file" line per asset. Each language
+# has its index and, when the manifest says so, a details sidecar
+# (<code>.details, entry pages, optional in the app).
 python3 -I - "$idx_dir" "$out_dir" "$tag" "$ASSETS_PER_RELEASE" "${gzip_cmd[@]}" <<'PY'
-import json, os, pathlib, subprocess, sys
+import json, os, pathlib, shutil, subprocess, sys
 idx_dir, out_dir, tag, per_release = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
 gzip_cmd = sys.argv[5:]
 manifest = json.loads((idx_dir / "manifest.json").read_text())
 plan = []
-for i, lang in enumerate(manifest["languages"]):
-    code = lang["code"]
-    src = idx_dir / f"{code}.idx"
-    dst = out_dir / f"{code}.idx.gz"
+
+def publish(src):
+    """src -> out_dir/<name>.gz; returns (gz path, release tag)."""
+    dst = out_dir / (src.name + ".gz")
+    ready = idx_dir / (src.name + ".gz")
     if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime:
         tmp = dst.with_suffix(".gz.tmp")
-        with open(tmp, "wb") as f:
-            subprocess.run([*gzip_cmd, str(src)], stdout=f, check=True)
+        if ready.exists() and ready.stat().st_mtime >= src.stat().st_mtime:
+            shutil.copyfile(ready, tmp)
+        else:
+            with open(tmp, "wb") as f:
+                subprocess.run([*gzip_cmd, str(src)], stdout=f, check=True)
         os.replace(tmp, dst)
-    part = i // per_release
+    part = len(plan) // per_release
     release = tag if part == 0 else f"{tag}-{part + 1}"
+    plan.append(f"{release}\t{dst}")
+    return dst, release
+
+for lang in manifest["languages"]:
+    code = lang["code"]
+    src = idx_dir / f"{code}.idx"
+    dst, release = publish(src)
     lang["bytes"] = src.stat().st_size
     lang["gzBytes"] = dst.stat().st_size
     lang["url"] = f"../../download/{release}/{dst.name}"
-    plan.append(f"{release}\t{dst}")
+    details = lang.get("details")
+    if details:
+        dsrc = idx_dir / f"{code}.details"
+        ddst, drelease = publish(dsrc)
+        details["bytes"] = dsrc.stat().st_size
+        details["gzBytes"] = ddst.stat().st_size
+        details["url"] = f"../../download/{drelease}/{ddst.name}"
 (out_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, separators=(",", ":")) + "\n")
 plan.append(f"{tag}\t{out_dir / 'manifest.json'}")
 (out_dir / "upload-plan.tsv").write_text("\n".join(plan) + "\n")
-print(f"{len(manifest['languages'])} languages, {sum(l['gzBytes'] for l in manifest['languages'])} bytes gzipped")
+total = sum(l["gzBytes"] + (l.get("details") or {}).get("gzBytes", 0) for l in manifest["languages"])
+print(f"{len(manifest['languages'])} languages, {len(plan)} assets, {total} bytes gzipped")
 PY
 
 # Extra parts first (sorted descending so TAG is created last and is the latest).
