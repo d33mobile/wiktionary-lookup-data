@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Publishes language indexes as GitHub release assets of this repository.
 #
-# Usage: upload.sh IDX_DIR OUT_DIR TAG
+# Usage: upload.sh IDX_DIR OUT_DIR TAG [WIKIPEDIA_MANIFEST]
 #   IDX_DIR  holds <code>.idx files, optional <code>.details sidecars and
 #            manifest.json ({languages: [{code, name, entries, bytes, sha256,
 #            url, details?: {url, bytes, sha256, entries}}]})
@@ -16,13 +16,19 @@
 # are created first and TAG, which holds the manifest, last and marked
 # latest. Assets already uploaded with the same size are skipped, so a
 # failed run can be repeated.
+#
+# WIKIPEDIA_MANIFEST: a fragment {wikipedia: [{kind: 'wikipedia', code, url
+# (a .gz next to the fragment), bytes, sha256, ...}]}; those entries go
+# into the published manifest's separate "wikipedia" array (apps before 0.9
+# read only "languages"), their files as wikipedia-<code>.idx.gz.
 set -euo pipefail
 
 REPO=d33mobile/wiktionary-lookup-data
 ASSETS_PER_RELEASE=900
 idx_dir=${1:?usage: upload.sh IDX_DIR OUT_DIR TAG}
 out_dir=${2:?usage: upload.sh IDX_DIR OUT_DIR TAG}
-tag=${3:?usage: upload.sh IDX_DIR OUT_DIR TAG}
+tag=${3:?usage: upload.sh IDX_DIR OUT_DIR TAG [WIKIPEDIA_MANIFEST]}
+wikipedia=${4:-}
 mkdir -p "$out_dir"
 
 gzip_cmd=(gzip -9 -n -c)
@@ -32,11 +38,16 @@ if command -v pigz >/dev/null; then gzip_cmd=(pigz -9 -n -c); fi
 # published manifest and one "tag<TAB>file" line per asset. Each language
 # has its index and, when the manifest says so, a details sidecar
 # (<code>.details, entry pages, optional in the app).
-python3 -I - "$idx_dir" "$out_dir" "$tag" "$ASSETS_PER_RELEASE" "${gzip_cmd[@]}" <<'PY'
+python3 -I - "$idx_dir" "$out_dir" "$tag" "$ASSETS_PER_RELEASE" "$wikipedia" "${gzip_cmd[@]}" <<'PY'
 import json, os, pathlib, shutil, subprocess, sys
 idx_dir, out_dir, tag, per_release = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
-gzip_cmd = sys.argv[5:]
+wikipedia_fragment = sys.argv[5]
+gzip_cmd = sys.argv[6:]
 manifest = json.loads((idx_dir / "manifest.json").read_text())
+# Wikipedia entries merged into "languages" by the builder would show up in
+# apps before 0.9 as a second language of the same code: they are published
+# from the fragment, in "wikipedia", only.
+manifest["languages"] = [l for l in manifest["languages"] if l.get("kind", "wiktionary") != "wikipedia"]
 plan = []
 
 def publish(src):
@@ -70,10 +81,23 @@ for lang in manifest["languages"]:
         details["bytes"] = dsrc.stat().st_size
         details["gzBytes"] = ddst.stat().st_size
         details["url"] = f"../../download/{drelease}/{ddst.name}"
+if wikipedia_fragment:
+    fragment_path = pathlib.Path(wikipedia_fragment)
+    wikis = []
+    for w in json.loads(fragment_path.read_text())["wikipedia"]:
+        src = fragment_path.parent / w["url"]
+        dst = out_dir / f"wikipedia-{w['code']}.idx.gz"
+        if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime:
+            shutil.copyfile(src, dst)
+        part = len(plan) // per_release
+        release = tag if part == 0 else f"{tag}-{part + 1}"
+        plan.append(f"{release}\t{dst}")
+        wikis.append(dict(w, kind="wikipedia", gzBytes=dst.stat().st_size, url=f"../../download/{release}/{dst.name}"))
+    manifest["wikipedia"] = wikis
 (out_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, separators=(",", ":")) + "\n")
 plan.append(f"{tag}\t{out_dir / 'manifest.json'}")
 (out_dir / "upload-plan.tsv").write_text("\n".join(plan) + "\n")
-total = sum(l["gzBytes"] + (l.get("details") or {}).get("gzBytes", 0) for l in manifest["languages"])
+total = sum(l["gzBytes"] + (l.get("details") or {}).get("gzBytes", 0) for l in manifest["languages"] + manifest.get("wikipedia", []))
 print(f"{len(manifest['languages'])} languages, {len(plan)} assets, {total} bytes gzipped")
 PY
 
